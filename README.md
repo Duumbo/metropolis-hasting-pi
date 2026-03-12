@@ -50,7 +50,7 @@ Dans cette portion de code, ils devraient prendre en considération la même cho
 que je parle ici, mais ils ne le font pas. Ça devrait être
 `p = w * (n_accessible / n_previous_accessible)`, pour que ça fonctionne avec le
 cas à conditions de frontière fermées.
-'''C
+'''C {
 void VMCMakeSample(...)
 {
     (...)
@@ -126,4 +126,4 @@ void makeCandidate_hopping(int *mi_, int *ri_, int *rj_, int *s_, int *rejectFla
 
   return;
 }
-'''
+}'''
