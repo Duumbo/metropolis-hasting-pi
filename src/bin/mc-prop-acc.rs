@@ -2,21 +2,35 @@
 use rand::prelude::*;
 use std::fs::File;
 use std::io::prelude::*;
+use std::sync::Mutex;
+use std::thread;
+use std::sync::Arc;
 
 // Grid size
-const SIZE: usize = 10;
+const SIZE: usize = 100;
 // Radius of the inscribed circle
 const RADIUS: usize = SIZE / 2;
-const NSAMP: usize = 10_000;
-const NWARM: usize = 0;
+const NSAMP: usize = 200;
+const NWARM: usize = 1000;
 // Sample interval
-const NSKIP: usize = 10;
-const N_RUNS: usize = 1;
+const NSKIP: usize = 1;
+const N_RUNS: usize = 1000;
 // If true, probabilité d'acceptation = 0.5 * (n_voisins new) / (n_voisins old)
 // If false, probabilité d'acceptation = 0.5
 const NEIGHBORS_CHECK: bool = true;
 const SEED: u64 = 101203;
 const INITIAL_POINT: (usize, usize) = (0, 0);
+// Gaussian sigma and mean
+const SIGMA: f64 = SIZE as f64 / 10.0;
+const XMEAN: usize = SIZE/2;
+const YMEAN: usize = SIZE/2;
+
+fn rho(point: (usize, usize)) -> f64 {
+    let x = point.0 as f64 - (XMEAN -1) as f64;
+    let y = point.1 as f64 - (YMEAN-1) as f64;
+    let c = 0.0;
+    <f64>::exp( - (x*x + y*y) / (2.0 * (SIGMA+c)))
+}
 
 fn compute_n_neighbors(coords: (usize, usize)) -> usize {
     let x1 = coords.0;
@@ -103,17 +117,21 @@ fn propose<R>(x: (usize, usize), rng: &mut R) -> (usize, usize)
     coords_out
 }
 
-fn compute_pi() -> f64 {
+fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> f64 {
     // Our sampling point
     let mut x = INITIAL_POINT;
     let mut count = 0;
-    let mut fp = File::create("distribution").unwrap();
-    fp.write(format!("# {} {} {} ", SIZE, NSAMP, NWARM).as_bytes()).unwrap();
+    let mut sample = 0.0;
 
-    let mut rng = SmallRng::seed_from_u64(SEED);
+    let mut rng = SmallRng::seed_from_u64(SEED + rng);
     for _ in 0..NWARM {
         let xprop = propose(x, &mut rng);
-        if rng.random_bool(0.5) {
+
+        let rho1 = rho((x.0, x.1));
+        let rho2 = rho((xprop.0, xprop.1));
+        let ratio = rho2 / rho1;
+
+        if rng.random_bool(ratio.min(1.0)) {
             // Accept
             x = xprop;
         }
@@ -122,42 +140,61 @@ fn compute_pi() -> f64 {
     println!("Initial point = ({}, {})", x.0, x.1);
     for i in 0..NSAMP * NSKIP {
         let xprop = propose(x, &mut rng);
-        if rng.random_bool(0.5) {
+
+        let rho1 = rho((x.0, x.1));
+        let rho2 = rho((xprop.0, xprop.1));
+        let ratio = rho2 / rho1;
+
+        if rng.random_bool(ratio.min(1.0)) {
+            count += 1;
             // Accept
             x = xprop;
         }
 
-        // Distance from origin
-        let (xrel, yrel) = (x.0 as isize - RADIUS as isize, x.1 as isize - RADIUS as isize);
-        let distsq = (xrel * xrel + yrel * yrel) as usize;
-
         if i % NSKIP == 0 {
             // Sample
+            let mut fp = fp_mutex.lock().unwrap();
             fp.write(format!("{}\n", x.0 + SIZE * x.1).as_bytes()).unwrap();
-            if distsq <= RADIUS * RADIUS {
-                count += 1;
-            }
+
+            let r1 =
+                ((x.0 as i32 - XMEAN as i32) * (x.0 as i32 - XMEAN as i32)
+                 + (x.1 as i32 - YMEAN as i32) * (x.1 as i32 - YMEAN as i32)) as f64;
+            let gauss = <f64>::exp(-r1/(2.0*SIGMA));
+            let rho_x = rho((x.0, x.1));
+
+            sample += gauss / rho_x;
         }
     }
     let _area_sq = NSAMP;
     let _area_circ = count;
     // A_s / A_c = pi r^2 / 4 r^2
     println!("count = {}", count);
-    let pi = 4.0 * count as f64 / (NSAMP) as f64;
+    // A_g / A_c = pi / r^3
+    let pi = (SIGMA / 2.0) * sample as f64 / ((NSAMP) as f64);
     println!("pi = {}", pi);
     pi
 }
 
 fn main() {
-    let mut pi_avg = 0.0;
-    let mut pi_dev = 0.0;
-    for _ in 0..N_RUNS {
-        let pi = compute_pi();
-        pi_avg += pi;
-        pi_dev += pi*pi;
+    let mut fp = File::create("distribution").unwrap();
+    fp.write(format!("# {} {} {} ", SIZE, NSAMP, NWARM).as_bytes()).unwrap();
+    let shared_fp = Arc::new(Mutex::new(fp));
+    let mut threads = Vec::with_capacity(N_RUNS);
+    let approx_pi = Arc::new(Mutex::new(0.0));
+    for i in 0..N_RUNS {
+        let fp = shared_fp.clone();
+        let approx_pi_local = approx_pi.clone();
+        let thread_handle = thread::spawn(move || {
+            let pi = compute_pi(fp, i as u64);
+            let mut handle = approx_pi_local.lock().unwrap();
+            *handle += pi;
+        });
+        threads.push(thread_handle);
     }
-    pi_avg = pi_avg / N_RUNS as f64;
-    pi_dev = pi_dev / N_RUNS as f64 - pi_avg*pi_avg;
-    println!("Avg = {}", pi_avg);
-    println!("Dev = {}", pi_dev);
+
+    for thread in threads.into_iter() {
+        thread.join().expect("Bruh");
+    }
+    let pi = approx_pi.lock().unwrap();
+    println!("Approx pi = {}", *pi / N_RUNS as f64);
 }
