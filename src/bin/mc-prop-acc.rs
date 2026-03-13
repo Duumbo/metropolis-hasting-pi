@@ -26,8 +26,10 @@ const XMEAN: usize = SIZE/2;
 const YMEAN: usize = SIZE/2;
 
 fn rho(point: (usize, usize)) -> f64 {
-    let x = point.0 as f64 - (XMEAN -1) as f64;
-    let y = point.1 as f64 - (YMEAN-1) as f64;
+    let shiftx = 1;
+    let shifty = 1;
+    let x = point.0 as f64 - (XMEAN -shiftx) as f64;
+    let y = point.1 as f64 - (YMEAN-shifty) as f64;
     let c = 0.0;
     <f64>::exp( - (x*x + y*y) / (2.0 * (SIGMA+c)))
 }
