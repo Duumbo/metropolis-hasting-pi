@@ -1,17 +1,17 @@
 /// Compute pi with Metropolis-Hasting
 use rand::prelude::*;
-use std::fs::File;
-use std::io::prelude::*;
+use std::fs::{File, OpenOptions};
+use std::io::{SeekFrom, prelude::*};
 use std::sync::Mutex;
 use std::thread;
 use std::sync::Arc;
 
 // Grid size
-const SIZE: usize = 100;
+const SIZE: usize = 51;
 // Radius of the inscribed circle
 const RADIUS: usize = SIZE / 2;
-const NSAMP: usize = 200;
-const NWARM: usize = 1000;
+const NSAMP: usize = 100;
+const NWARM: usize = 200;
 // Sample interval
 const NSKIP: usize = 1;
 const N_RUNS: usize = 1000;
@@ -21,17 +21,17 @@ const NEIGHBORS_CHECK: bool = true;
 const SEED: u64 = 101203;
 const INITIAL_POINT: (usize, usize) = (0, 0);
 // Gaussian sigma and mean
-const SIGMA: f64 = SIZE as f64 / 10.0;
+const SIGMA: f64 = 2.0;
 const XMEAN: usize = SIZE/2;
 const YMEAN: usize = SIZE/2;
 
 fn rho(point: (usize, usize)) -> f64 {
-    let shiftx = 1;
-    let shifty = 1;
+    let shiftx = 0;
+    let shifty = 0;
     let x = point.0 as f64 - (XMEAN -shiftx) as f64;
     let y = point.1 as f64 - (YMEAN-shifty) as f64;
     let c = 0.0;
-    <f64>::exp( - (x*x + y*y) / (2.0 * (SIGMA+c)))
+    <f64>::exp( - (x*x + y*y) / (2.0 * (SIGMA+c) * (SIGMA+c)))
 }
 
 fn compute_n_neighbors(coords: (usize, usize)) -> usize {
@@ -119,11 +119,10 @@ fn propose<R>(x: (usize, usize), rng: &mut R) -> (usize, usize)
     coords_out
 }
 
-fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> f64 {
+fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> Vec<usize> {
     // Our sampling point
     let mut x = INITIAL_POINT;
-    let mut count = 0;
-    let mut sample = 0.0;
+    let mut travel_map = vec![0; SIZE*SIZE];
 
     let mut rng = SmallRng::seed_from_u64(SEED + rng);
     for _ in 0..NWARM {
@@ -139,7 +138,7 @@ fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> f64 {
         }
     }
 
-    println!("Initial point = ({}, {})", x.0, x.1);
+    //println!("Initial point = ({}, {})", x.0, x.1);
     for i in 0..NSAMP * NSKIP {
         let xprop = propose(x, &mut rng);
 
@@ -148,7 +147,6 @@ fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> f64 {
         let ratio = rho2 / rho1;
 
         if rng.random_bool(ratio.min(1.0)) {
-            count += 1;
             // Accept
             x = xprop;
         }
@@ -158,38 +156,30 @@ fn compute_pi(fp_mutex: Arc<Mutex<File>>, rng: u64) -> f64 {
             let mut fp = fp_mutex.lock().unwrap();
             fp.write(format!("{}\n", x.0 + SIZE * x.1).as_bytes()).unwrap();
 
-            let r1 =
-                ((x.0 as i32 - XMEAN as i32) * (x.0 as i32 - XMEAN as i32)
-                 + (x.1 as i32 - YMEAN as i32) * (x.1 as i32 - YMEAN as i32)) as f64;
-            let gauss = <f64>::exp(-r1/(2.0*SIGMA));
-            let rho_x = rho((x.0, x.1));
-
-            sample += gauss / rho_x;
+            travel_map[x.0 + x.1 * SIZE] += 1;
         }
     }
-    let _area_sq = NSAMP;
-    let _area_circ = count;
-    // A_s / A_c = pi r^2 / 4 r^2
-    println!("count = {}", count);
     // A_g / A_c = pi / r^3
-    let pi = (SIGMA / 2.0) * sample as f64 / ((NSAMP) as f64);
-    println!("pi = {}", pi);
-    pi
+    travel_map
 }
 
 fn main() {
-    let mut fp = File::create("distribution").unwrap();
-    fp.write(format!("# {} {} {} ", SIZE, NSAMP, NWARM).as_bytes()).unwrap();
+    let file_name = format!("data/sim_{}_{}_{}.data", NSAMP, NWARM, N_RUNS);
+    let fp = File::create(file_name.clone()).unwrap();
     let shared_fp = Arc::new(Mutex::new(fp));
     let mut threads = Vec::with_capacity(N_RUNS);
-    let approx_pi = Arc::new(Mutex::new(0.0));
+    let travel_map = Arc::new(Mutex::new(vec![0; SIZE*SIZE]));
     for i in 0..N_RUNS {
         let fp = shared_fp.clone();
-        let approx_pi_local = approx_pi.clone();
+        let thread_local_tmap = travel_map.clone();
         let thread_handle = thread::spawn(move || {
-            let pi = compute_pi(fp, i as u64);
-            let mut handle = approx_pi_local.lock().unwrap();
-            *handle += pi;
+            let tmap = compute_pi(fp, i as u64);
+            let mut out_tmap = thread_local_tmap.lock().unwrap();
+            for i in 0..SIZE {
+                for j in 0..SIZE {
+                    out_tmap[j + i*SIZE] += tmap[j + i*SIZE];
+                }
+            }
         });
         threads.push(thread_handle);
     }
@@ -197,6 +187,17 @@ fn main() {
     for thread in threads.into_iter() {
         thread.join().expect("Bruh");
     }
-    let pi = approx_pi.lock().unwrap();
-    println!("Approx pi = {}", *pi / N_RUNS as f64);
+    drop(shared_fp);
+    let mut fp = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(file_name)
+        .unwrap();
+    fp.seek(SeekFrom::Start(0)).unwrap();
+    let travel_map = travel_map.lock().unwrap();
+    let max_visited = *travel_map.iter().max().unwrap();
+    let pi = (NSAMP * N_RUNS) as f64 / (2.0 * max_visited as f64 * SIGMA * SIGMA);
+    println!("Max visited = {}", max_visited);
+    println!("Approx pi = {}", pi);
+    fp.write(format!("# {} {} {} {} {}\n", SIZE, NSAMP, NWARM, N_RUNS, pi).as_bytes()).unwrap();
 }
